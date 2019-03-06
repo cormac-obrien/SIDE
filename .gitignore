@@ -1,0 +1,6 @@
+data/
+*.mat
+*.xz
+.ipynb_checkpoints/
+*.bak
+__pycache__/

@@ -5,6 +5,7 @@ import numpy as np
 import os
 import requests
 from scipy.io import loadmat
+from skimage.transform import resize
 from tqdm import tqdm
 
 DATA_URL = 'http://horatio.cs.nyu.edu/mit/silberman/nyu_depth_v2/nyu_depth_v2_labeled.mat'
@@ -44,20 +45,25 @@ def get_data():
     return h5py.File(DATA_FILE, 'r'), loadmat(SPLIT_FILE)
 
 def get_image(images, index):
+    assert not np.any(np.isnan(images[index]))
+    assert not np.any(np.isinf(images[index]))
     return np.transpose(images[index] / 255.0, (2, 1, 0))
 
 def get_depth(depths, index):
-    return np.transpose(depths[index], (1, 0))
+    assert not np.any(np.isnan(depths[index]))
+    assert not np.any(np.isinf(depths[index]))
+    return np.transpose(depths[index] / np.max(depths[index]), (1, 0))
 
-class NyuSequence(Sequence, batch_size=1, shuffle=True, dims=(NYU_WIDTH, NYU_HEIGHT)):
-    def __init__(self):
+class NyuSequence(Sequence):
+    def __init__(self, batch_size=1, shuffle=True, dims=(NYU_WIDTH, NYU_HEIGHT), depth_scale=1):
         data, split = get_data()
-        self.train_ids = split['trainNdxs']
+        self.train_ids = split['trainNdxs'].flatten()
         self.images = data['images']
         self.depths = data['depths']
         self.batch_size = batch_size
         self.state = np.random.RandomState(seed=42)
-        self.dims
+        self.dims = (dims[1], dims[0])
+        self.depth_scale = depth_scale
 
         self.shuffle = shuffle
         if shuffle:
@@ -66,7 +72,7 @@ class NyuSequence(Sequence, batch_size=1, shuffle=True, dims=(NYU_WIDTH, NYU_HEI
             self.perm = np.arange(len(self.train_ids))
 
     def __len__(self):
-        return int(np.ceil(len(self.train_ids) / batch_size))
+        return int(np.ceil(len(self.train_ids) / self.batch_size))
 
     def __getitem__(self, index):
         perm_ids = self.perm[index * self.batch_size : (index + 1) * self.batch_size]
@@ -79,12 +85,16 @@ class NyuSequence(Sequence, batch_size=1, shuffle=True, dims=(NYU_WIDTH, NYU_HEI
             self.perm = self.state.permutation(len(self.train_ids))
 
     def _generate(self, ids):
-        w, h = self.dims
-        X = np.empty((self.batch_size, h, w, NYU_CHANNELS))
-        y = np.empty((self.batch_size, h, w, 1))
+        xh, xw = self.dims
+        yh, yw = int(xh * self.depth_scale), int(xw * self.depth_scale)
+        X = np.empty((len(ids), xh, xw, NYU_CHANNELS))
+        y = np.empty((len(ids), yh, yw, 1))
 
-        for i in range(self.batch_size):
-            X[i,] = get_image(self.images, i)
-            y[i] = get_depth(self.depths, i)
+        for i in range(len(ids)):
+            X[i,] = resize(get_image(self.images, ids[i]), (xh, xw))
+            y[i] = np.expand_dims(resize(get_depth(self.depths, ids[i]), (yh, yw)), 2)
 
         return X, y
+
+    def data_shape(self):
+        return (self.dims[0], self.dims[1], NYU_CHANNELS)
