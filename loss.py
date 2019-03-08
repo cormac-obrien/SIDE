@@ -14,8 +14,12 @@ def sobel(x):
 # [eigen 2015]
 def scale_invariant_gradient_loss(N):
     def inner(y_pred, y_true):
-        D = K.log(y_pred)
-        D_star = K.log(y_true)
+        #D = K.log(y_pred)
+        #D_star = K.log(y_true)
+        # THESE CAUSE NaNs!
+
+        D = y_pred
+        D_star = y_true
         d = D - D_star
 
         term1 = (1 / N) * K.sum(K.pow(d, 2))

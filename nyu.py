@@ -1,4 +1,5 @@
 import h5py
+import json
 from tensorflow.keras.utils import Sequence
 import math
 import numpy as np
@@ -53,6 +54,100 @@ def get_depth(depths, index):
     assert not np.any(np.isnan(depths[index]))
     assert not np.any(np.isinf(depths[index]))
     return np.transpose(depths[index] / np.max(depths[index]), (1, 0))
+
+# calculate mean and stddev by Welford's algorithm
+class Stats():
+    def __init__(self):
+        self.M = 0
+        self.S = 0
+        self.old_M = 0
+        self.old_S = 0
+        self.count = 0
+
+    def push(self, x):
+        self.count += 1
+
+        if self.count == 1:
+            self.M = x
+            self.old_M = x
+            self.old_S = 0
+        else:
+            self.M = self.old_M + (x - self.old_M) / self.count
+            self.S = self.old_S + (x - self.old_M) * (x - self.M)
+
+            self.old_M = self.M
+            self.old_S = self.S
+
+    def mean(self):
+        if self.count > 0:
+            return self.M
+        else:
+            return 0
+
+    def variance(self):
+        if self.count > 1:
+            return self.S / (self.count - 1)
+        else:
+            return 0
+
+    def stddev(self):
+        return np.sqrt(self.variance())
+
+def calc_stats():
+    data, splits = get_data()
+    train_ids = splits['trainNdxs'].flatten()
+
+    rs = Stats()
+    gs = Stats()
+    bs = Stats()
+    ds = Stats()
+
+    for train_id in train_ids:
+        r, g, b = data['images'][train_id][:,]
+        d = data['depths'][train_id]
+
+        r = r.reshape(-1)
+        g = g.reshape(-1)
+        b = b.reshape(-1)
+        d = d.reshape(-1)
+
+        for i in tqdm(range(len(r))):
+            rs.push(r[i])
+            gs.push(g[i])
+            bs.push(b[i])
+            ds.push(d[i])
+
+    with open('stats.json', 'w') as f:
+        json.dumps({
+            'r': {
+                'mean': rs.mean(),
+                'stddev': rs.stddev(),
+            },
+            'g': {
+                'mean': gs.mean(),
+                'stddev': gs.stddev(),
+            },
+            'b': {
+                'mean': bs.mean(),
+                'stddev': bs.stddev(),
+            },
+            'd': {
+                'mean': ds.mean(),
+                'stddev': ds.stddev(),
+            },
+        }, f)
+
+    return (rs, gs, bs, ds)
+
+def stddev():
+    data, split = get_data()
+
+    # calculate standard deviation for RGB, YCbCr and depth
+    r = 0
+    r_prev = 0
+
+    for img in data['images']:
+        r, g, b = img[:,]
 
 class NyuSequence(Sequence):
     def __init__(self, batch_size=1, shuffle=True, dims=(NYU_WIDTH, NYU_HEIGHT), depth_scale=1):
