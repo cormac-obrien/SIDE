@@ -18,6 +18,14 @@ NYU_WIDTH = 640
 NYU_HEIGHT = 480
 NYU_CHANNELS = 3
 
+# calculated by Eigen et al.
+IMG_MEAN = 109.31410628
+IMG_STDDEV = 76.18328376
+DEPTH_MEAN = 2.53434899
+DEPTH_STDDEV = 1.22576694
+LOGDEPTH_MEAN = 0.82473954
+LOGDEPTH_STDDEV = 0.45723134
+
 def download(src, dst):
     r = requests.get(src, stream=True)
     total_size = int(r.headers.get('content-length', 0))
@@ -48,12 +56,12 @@ def get_data():
 def get_image(images, index):
     assert not np.any(np.isnan(images[index]))
     assert not np.any(np.isinf(images[index]))
-    return np.transpose(images[index] / 255.0, (2, 1, 0))
+    return np.transpose((images[index] - IMG_MEAN) / IMG_STDDEV, (2, 1, 0))
 
 def get_depth(depths, index):
     assert not np.any(np.isnan(depths[index]))
     assert not np.any(np.isinf(depths[index]))
-    return np.transpose(depths[index] / np.max(depths[index]), (1, 0))
+    return np.transpose((depths[index] - DEPTH_MEAN) / DEPTH_STDDEV, (1, 0))
 
 # calculate mean and stddev by Welford's algorithm
 class Stats():
