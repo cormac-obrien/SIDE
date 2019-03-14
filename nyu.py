@@ -1,3 +1,4 @@
+import features
 import h5py
 import json
 from tensorflow.keras.utils import Sequence
@@ -6,6 +7,7 @@ import numpy as np
 import os
 import requests
 from scipy.io import loadmat
+import skimage
 from skimage.transform import resize
 from tqdm import tqdm
 
@@ -51,12 +53,21 @@ def get_data():
     else:
         print('Found {}'.format(SPLIT_FILE))
 
-    return h5py.File(DATA_FILE, 'r'), loadmat(SPLIT_FILE)
+    splits = loadmat(SPLIT_FILE)
+
+    # indices are one-based, we need zero-based
+    splits['trainNdxs'] = splits['trainNdxs'] - 1
+    splits['testNdxs'] = splits['testNdxs'] - 1
+
+    return h5py.File(DATA_FILE, 'r'), splits
 
 def get_image(images, index):
     assert not np.any(np.isnan(images[index]))
     assert not np.any(np.isinf(images[index]))
     return np.transpose((images[index] - IMG_MEAN) / IMG_STDDEV, (2, 1, 0))
+
+def get_logdepth(depths, index):
+    return np.transpose((np.log(depths[index]) - LOGDEPTH_MEAN) / LOGDEPTH_STDDEV, (1, 0))
 
 def get_depth(depths, index):
     assert not np.any(np.isnan(depths[index]))
@@ -157,47 +168,97 @@ def stddev():
     for img in data['images']:
         r, g, b = img[:,]
 
+def train_validation_split(val_ratio):
+    _, split = get_data()
+    ids = split['trainNdxs'].flatten()
+    train_count = round((1 - val_ratio) * len(ids))
+    train_ids = ids[:train_count]
+    val_ids = ids[train_count:]
+
+    return train_ids, val_ids
+
+feature_sizes = {
+    'rgb': 3,
+    'ycbcr': 3,
+    'laws': 9,
+    'edge': 6,
+}
+
+feature_funcs = {
+    'rgb': lambda x: x,
+    'ycbcr': skimage.color.rgb2ycbcr,
+    'laws': features.laws,
+    'edge': features.edge,
+}
+
 class NyuSequence(Sequence):
-    def __init__(self, batch_size=1, shuffle=True, dims=(NYU_WIDTH, NYU_HEIGHT), depth_scale=1):
+    def __init__(self,
+                 ids,
+                 batch_size=1,
+                 shuffle=True,
+                 features=['rgb'],
+                 dims=(NYU_WIDTH, NYU_HEIGHT),
+                 depth_scale=1,
+                 logdepth=True
+    ):
         data, split = get_data()
-        self.train_ids = split['trainNdxs'].flatten()
+        self.ids = ids
         self.images = data['images']
         self.depths = data['depths']
         self.batch_size = batch_size
         self.state = np.random.RandomState(seed=42)
         self.dims = (dims[1], dims[0])
         self.depth_scale = depth_scale
+        self.logdepth = logdepth
+
+        if not set(features).issubset(set(feature_sizes.keys())):
+            raise ValueError("Unrecognized feature name")
+
+        self.features = features
 
         self.shuffle = shuffle
         if shuffle:
-            self.perm = self.state.permutation(len(self.train_ids))
+            self.perm = self.state.permutation(len(self.ids))
         else:
-            self.perm = np.arange(len(self.train_ids))
+            self.perm = np.arange(len(self.ids))
 
     def __len__(self):
-        return int(np.ceil(len(self.train_ids) / self.batch_size))
+        return int(np.ceil(len(self.ids) / self.batch_size))
 
     def __getitem__(self, index):
         perm_ids = self.perm[index * self.batch_size : (index + 1) * self.batch_size]
-        batch_ids = [self.train_ids[i] for i in perm_ids]
+        batch_ids = [self.ids[i] for i in perm_ids]
         X, y = self._generate(batch_ids)
         return X, y
 
     def on_epoch_end(self):
         if self.shuffle:
-            self.perm = self.state.permutation(len(self.train_ids))
+            self.perm = self.state.permutation(len(self.ids))
 
     def _generate(self, ids):
         xh, xw = self.dims
         yh, yw = int(xh * self.depth_scale), int(xw * self.depth_scale)
-        X = np.empty((len(ids), xh, xw, NYU_CHANNELS))
+
+        total_channels = sum([feature_sizes[f] for f in self.features])
+        X = np.empty((len(ids), xh, xw, total_channels))
         y = np.empty((len(ids), yh, yw, 1))
 
         for i in range(len(ids)):
-            X[i,] = resize(get_image(self.images, ids[i]), (xh, xw))
-            y[i] = np.expand_dims(resize(get_depth(self.depths, ids[i]), (yh, yw)), 2)
+            rgb = resize(get_image(self.images, ids[i]), self.dims)
+            chan_ofs = 0
+            for feat in self.features:
+                n_channels = feature_sizes[feat]
+                X[i, :, :, chan_ofs: chan_ofs + n_channels] = feature_funcs[feat](rgb)
+                chan_ofs += n_channels
+
+            if self.logdepth:
+                y_tmp = get_logdepth(self.depths, ids[i])
+            else:
+                y_tmp = get_depth(self.depths, ids[i])
+
+            y[i] = np.expand_dims(resize(y_tmp, (yh, yw)), 2)
 
         return X, y
 
     def data_shape(self):
-        return (self.dims[0], self.dims[1], NYU_CHANNELS)
+        return (self.dims[0], self.dims[1], sum([feature_sizes[f] for f in self.features]))
