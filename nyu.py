@@ -28,6 +28,42 @@ DEPTH_STDDEV = 1.22576694
 LOGDEPTH_MEAN = 0.82473954
 LOGDEPTH_STDDEV = 0.45723134
 
+HARALICK_8_MEANS = np.array([
+    58.65959549,
+    33.22990036,
+    179.54331970,
+    159.03523254,
+    0.99999994,
+    26982.94921875,
+])
+
+HARALICK_8_STDDEVS = np.array([
+    133.71199036,
+    45.176780701,
+    18.366350174,
+    41.118770599,
+    6.928805192e-07,
+    11797.33691406,
+])
+
+HARALICK_16_MEANS = np.array([
+    594.39331055,
+    255.48921203,
+    622.93261718,
+    522.14239501,
+    1.0,
+    302033.5,
+])
+
+HARALICK_16_STDDEVS = [
+    1023.28320313,
+    276.62353515,
+    94.33602905,
+    171.46725464,
+    1.37310266e-07,
+    175026.8125,
+]
+
 def download(src, dst):
     r = requests.get(src, stream=True)
     total_size = int(r.headers.get('content-length', 0))
@@ -170,10 +206,16 @@ def stddev():
 
 def train_validation_split(val_ratio):
     _, split = get_data()
+
     ids = split['trainNdxs'].flatten()
     train_count = round((1 - val_ratio) * len(ids))
-    train_ids = ids[:train_count]
-    val_ids = ids[train_count:]
+
+    # choose the same random validation set every time
+    state = np.random.RandomState(seed=42)
+    perm = state.permutation(ids)
+
+    train_ids = perm[:train_count]
+    val_ids = perm[train_count:]
 
     return train_ids, val_ids
 
@@ -182,6 +224,9 @@ feature_sizes = {
     'ycbcr': 3,
     'laws': 9,
     'edge': 6,
+    'haralick4': 6,
+    'haralick8': 6,
+    'haralick16': 6,
 }
 
 feature_funcs = {
@@ -199,7 +244,7 @@ class NyuSequence(Sequence):
                  features=['rgb'],
                  dims=(NYU_WIDTH, NYU_HEIGHT),
                  depth_scale=1,
-                 logdepth=True
+                 logdepth=True,
     ):
         data, split = get_data()
         self.ids = ids
@@ -213,6 +258,10 @@ class NyuSequence(Sequence):
 
         if not set(features).issubset(set(feature_sizes.keys())):
             raise ValueError("Unrecognized feature name")
+
+        for f in ['haralick4', 'haralick8', 'haralick16']:
+            if f in features:
+                self.haralick = h5py.File('nyuv2_haralick.h5', 'r')
 
         self.features = features
 
@@ -240,22 +289,39 @@ class NyuSequence(Sequence):
         yh, yw = int(xh * self.depth_scale), int(xw * self.depth_scale)
 
         total_channels = sum([feature_sizes[f] for f in self.features])
-        X = np.empty((len(ids), xh, xw, total_channels))
-        y = np.empty((len(ids), yh, yw, 1))
 
-        for i in range(len(ids)):
+        count = len(ids)
+
+        X = np.empty((count, xh, xw, total_channels))
+        y = np.empty((count, yh, yw, 1))
+
+        for i in range(count):
             rgb = resize(get_image(self.images, ids[i]), self.dims)
+
             chan_ofs = 0
             for feat in self.features:
                 n_channels = feature_sizes[feat]
-                X[i, :, :, chan_ofs: chan_ofs + n_channels] = feature_funcs[feat](rgb)
+
+                if feat.startswith('haralick'):
+                    scale = feat.replace('haralick', '')
+                    if int(scale) == 8:
+                        means, stddevs = HARALICK_8_MEANS, HARALICK_8_STDDEVS
+                    elif int(scale) == 16:
+                        means, stddevs = HARALICK_16_MEANS, HARALICK_16_STDDEVS
+                    else:
+                        raise ValueError('Invalid Haralick scale')
+                    dataset = 'haralick_{}x'.format(scale)
+                    # scale to zero mean, unit variance
+                    haralick = (self.haralick[dataset][ids[i]] - means) / stddevs
+                    fmap = skimage.transform.resize(haralick, (self.dims), mode='reflect', order=1)
+                else:
+                    fmap = feature_funcs[feat](rgb)
+
+                X[i, :, :, chan_ofs: chan_ofs + n_channels] = fmap
                 chan_ofs += n_channels
 
-            if self.logdepth:
-                y_tmp = get_logdepth(self.depths, ids[i])
-            else:
-                y_tmp = get_depth(self.depths, ids[i])
-
+            depth_func = get_logdepth if self.logdepth else get_depth
+            y_tmp = depth_func(self.depths, ids[i])
             y[i] = np.expand_dims(resize(y_tmp, (yh, yw)), 2)
 
         return X, y

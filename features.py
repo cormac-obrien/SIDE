@@ -1,6 +1,7 @@
 import numpy as np
 import scipy as sp
 import skimage
+import skimage.feature
 from skimage.transform import resize
 
 # 3x3 Laws filters from [Saxena et al. 2007]
@@ -49,6 +50,57 @@ def laws(rgb_hwc):
 
 def edge(rgb_hwc):
     return apply_filters(rgb_hwc, NB)
+
+haralick_props = [
+    'contrast',
+    'dissimilarity',
+    'homogeneity',
+    'energy',
+    'correlation',
+    'ASM'
+]
+
+# split a 2-D array into patches
+def patches_2d(y, shape):
+    h, w = np.shape(y)
+    ph, pw = shape
+
+    # (img_r, patch_r, img_c, patch_c)
+    reshaped = y.reshape(h // ph, ph, w // pw, pw)
+
+    # (img_r, img_c, patch_r, patch_c)
+    return np.transpose(reshaped, (0, 2, 1, 3))
+
+def patch_glcm(rgb_hwc, shape, dist, angle):
+    h, w, _ = np.shape(rgb_hwc)
+    ycbcr = skimage.color.rgb2ycbcr(rgb_hwc)
+    y = ycbcr[:, :, 0]
+    bins = np.linspace(0, 256, num=8)
+    quant = np.digitize(y, bins)
+    patches = patches_2d(quant, shape)
+
+    # image row, image col, patch glcm row, patch glcm col, angle
+    out = np.zeros((patches.shape[0], patches.shape[1], 8, 8, 1, 4))
+
+    for py in range(patches.shape[0]):
+        for px in range(patches.shape[1]):
+            glcm = skimage.feature.greycomatrix(patches[py, px], [dist], angle, levels=len(bins))
+            out[py, px, ] = glcm
+
+    # sum over angles
+    return np.sum(out, axis=5)
+
+def patch_haralick(glcms):
+    # imrow, imcol, prop
+    out = np.zeros((glcms.shape[0], glcms.shape[1], len(haralick_props)))
+    for py in range(glcms.shape[0]):
+        for px in range(glcms.shape[1]):
+            # imrow, imcol, glcmrow, glcmcol, dist, (dummy angle)
+            glcm = np.expand_dims(glcms[py, px, :, :], -1)
+            for i, prop in enumerate(haralick_props):
+                out[py, px, i] = skimage.feature.greycoprops(glcm, prop)[0, 0]
+
+    return out
 
 def energy(x):
     pass
